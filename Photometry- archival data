@@ -1,0 +1,336 @@
+# Comet 29P/Schwassmann-Wachmann: processing archival photometric records
+
+This notebook parses ten text files of archival observation records (2015 to April 2025) into a single table of dates and magnitudes, converts the dates to Julian Date, separates the filter code, and selects the R-band entries. It then plots the R-band light curve and its brightness gradient, and fits a sinusoid.
+
+Place the input files in a folder called `data/` next to this notebook (`29P_2015.txt`, `29P_2016.txt`, `29P_2017.txt`, `29P_2018-19.txt`, ... `29P_2024-25.txt`).
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import re
+import os
+from astropy.time import Time
+from scipy.optimize import curve_fit
+
+# Define the directory containing the files
+data_directory = "data"
+
+# Define the input files
+input_files = [
+    "29P_2015.txt",
+    "29P_2016.txt",
+    "29P_2017.txt",
+    "29P_2018-19.txt",
+    "29P_2019-20.txt",
+    "29P_2020-21.txt",
+    "29P_2021-22.txt",
+    "29P_2022-23.txt",
+    "29P_2023-24.txt",
+    "29P_2024-25.txt"
+]
+
+# Define the output file path
+output_file = os.path.join(data_directory, "29P_Date_Magnitude.txt")
+
+# Initialize a list to store all processed data and a log dictionary
+all_data = []
+file_log = {}
+
+# Regular expressions to extract date and magnitude/filter information
+pattern_date = re.compile(r"(\d{4})\s(\d{2})\s(\d{1,2}\.\d+)")
+pattern_mag = re.compile(r"(\d{2}\.\d{1,2}[A-Za-z])")
+
+# Process each file
+for file_name in input_files:
+    file_path = os.path.join(data_directory, file_name)
+
+    if not os.path.exists(file_path):
+        print(f"Warning: File not found - {file_path}")
+        continue
+
+    with open(file_path, "r") as file:
+        lines = file.readlines()
+
+    original_line_count = len(lines)
+    processed_line_count = 0
+
+    for line in lines:
+        # Search for date and magnitude in each line
+        date_match = pattern_date.search(line)
+        mag_match = pattern_mag.search(line)
+
+        if date_match and mag_match:
+            year, month, day = date_match.groups()
+            day_decimal = round(float(day), 5)
+            date = f"{year} {month} {day_decimal:08.5f}"
+            magnitude = mag_match.group(1)
+
+            all_data.append([date, magnitude])
+            processed_line_count += 1
+
+    # Store log information
+    file_log[file_name] = {
+        "Original lines": original_line_count,
+        "Processed lines": processed_line_count
+    }
+
+# Save results to output file
+with open(output_file, "w") as out_file:
+    out_file.write("Date\tMagnitude\n")
+    for entry in all_data:
+        out_file.write("\t".join(entry) + "\n")
+
+# Print summary of each file's processing
+print(f"Processing complete. Results saved to: {output_file}")
+for file, stats in file_log.items():
+    print(f"{file}: {stats['Original lines']} lines read, {stats['Processed lines']} lines processed.")
+
+# Convert to Julian Dates 
+
+data_directory = "data"
+input_file = os.path.join(data_directory, "29P_Date_Magnitude.txt")
+input_file_2015 = os.path.join(data_directory, "29P_2015.txt")
+output_file = os.path.join(data_directory, "29P_Julian_Magnitude_Filter.txt")
+
+# Load the main data into a DataFrame
+df = pd.read_csv(input_file, sep="\t")
+# (Expected columns: "Date" and "Magnitude")
+
+# Function to convert a Date string to Julian Date.
+def to_julian(date_str):
+    """
+    Expects date_str in the format: "YYYY MM DD.DDDDD"
+    For example: "2024 05 12.34567"
+    """
+    parts = date_str.split()
+    if len(parts) < 3:
+        print("Error: Invalid date format:", date_str)
+        return None
+    year, month, day_decimal = parts
+    # Convert day_decimal into an integer day and a fractional part
+    day_decimal_float = float(day_decimal)
+    day_int = int(day_decimal_float)
+    day_fraction = day_decimal_float - day_int
+    # Convert the fractional day to hours and minutes (ignore seconds)
+    total_minutes = int(day_fraction * 1440)  # 1440 minutes in a day
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    # Compose an ISO-formatted date-time string (e.g., "2024-05-12 08:30")
+    date_iso = f"{year}-{month}-{day_int:02d} {hours:02d}:{minutes:02d}"
+    t = Time(date_iso, format='iso', scale='utc')
+    return round(t.jd, 5)
+
+# Apply the conversion to produce a new "Julian Date" column.
+df["Julian Date"] = df["Date"].apply(to_julian)
+
+# Separate Magnitude and Filter.
+# The convention is that the Filter is the last character in the Magnitude field.
+df["Filter"] = df["Magnitude"].str[-1]         # Extract the last character as Filter.
+df["Magnitude"] = df["Magnitude"].str[:-1]       # The rest is the numeric magnitude.
+
+# Extract Year from the Date (assumes the first token in 'Date' is the year)
+df["Year"] = df["Date"].str.split().str[0]
+
+# Keep only the desired columns and set proper order.
+df_final = df[["Year", "Julian Date", "Magnitude", "Filter"]]
+
+# Now process the 2015 data separately.
+# (Assuming the 2015 file has no header and that the Julian Date is in column 4 and Magnitude is in column 5)
+df_2015 = pd.read_csv(input_file_2015, sep="\t", header=None, usecols=[4, 5], 
+                      names=["Julian Date", "Magnitude"])
+# For 2015 data, assign a Year and an empty Filter column.
+df_2015["Year"] = "2015"
+df_2015["Filter"] = ""
+
+# Combine the main (2024–2025) data with the 2015 data.
+df_combined = pd.concat([df_final, df_2015[["Year", "Julian Date", "Magnitude", "Filter"]]], 
+                        ignore_index=True)
+
+# Sort the combined data by 'Year' and 'Julian Date'
+df_combined = df_combined.sort_values(by=["Year", "Julian Date"])
+
+# Save the processed data to the output file.
+df_combined.to_csv(output_file, sep='\t', index=False)
+
+# Report summary
+input_count = len(df) + len(df_2015)
+output_count = len(df_combined)
+print(f"Processing complete. Output file saved to: {output_file}")
+print(f"Input entries (main + 2015): {input_count}")
+print(f"Output entries: {output_count}")
+
+# Print the unique filter values found in the data.
+unique_filters = df_combined["Filter"].unique()
+print("Unique filter values found:", unique_filters)
+
+# Select R-Band observations
+
+data_directory = "data"
+input_file = os.path.join(data_directory, "29P_Julian_Magnitude_Filter.txt")
+output_file = os.path.join(data_directory, "29P_R.txt")
+
+try:
+    df = pd.read_csv(input_file, sep="\t")
+    
+    # Clean the 'Filter' column: remove any extra whitespace and standardize to uppercase
+    df['Filter'] = df['Filter'].astype(str).str.strip().str.upper()
+    
+    # Debug: print unique values found in the Filter column after cleaning
+    print("Unique filter values after cleaning:", df['Filter'].unique())
+    
+    # Filter the data where the 'Filter' column equals 'R'
+    df_filtered = df[df['Filter'] == 'R']
+    
+    # Extract the required columns (Year, Julian Date, and Magnitude)
+    df_filtered = df_filtered[['Year', 'Julian Date', 'Magnitude']]
+    
+    # Save the filtered data to the output file
+    df_filtered.to_csv(output_file, sep="\t", index=False)
+    
+    # Print the number of lines extracted
+    print(f"Extracted {len(df_filtered)} lines where Filter = R. Output saved to {output_file}")
+    
+except Exception as e:
+    print("An error occurred:", e)
+
+data_directory = "data"
+input_file = os.path.join(data_directory, "29P_Julian_Magnitude_Filter.txt")
+output_file = os.path.join(data_directory, "29P_R.txt")
+data = pd.read_csv(input_file, sep="\t")
+
+try:
+    df = pd.read_csv(input_file, sep="\t")
+
+    # Filter the data where 'Filter' column is 'R'
+    df_filtered = df[df['Filter'] == 'R']
+
+    # Extract the required columns (Year, Julian Date, and Magnitude)
+    df_filtered = df_filtered[['Year', 'Julian Date', 'Magnitude']]
+
+    # Save the filtered data to the output file
+    df_filtered.to_csv(output_file, sep="\t", index=False)
+
+    # Print the number of lines extracted
+    print(f"Extracted {len(df_filtered)} lines where Filter = R. Output saved to {output_file}")
+except Exception as e:
+    print("An error occurred:", e)
+
+# Sinusoidal Fit
+
+data_directory = "data"
+file_path = os.path.join(data_directory, "29P_R.txt")
+data = pd.read_csv(file_path, sep="\t")
+
+# Extract relevant columns
+julian_dates = data["Julian Date"].values
+magnitudes = data["Magnitude"].values
+
+# Remove NaNs and infinite values
+mask = ~np.isnan(julian_dates) & ~np.isnan(magnitudes) & ~np.isinf(julian_dates) & ~np.isinf(magnitudes)
+julian_dates, magnitudes = julian_dates[mask], magnitudes[mask]
+
+# Define the refined sinusoidal function
+def refined_sinusoidal(x, amplitude, phase, offset, period):
+    frequency = 1 / period
+    return amplitude * np.sin(2 * np.pi * frequency * x + phase) + offset
+
+# Initial guess and bounds
+initial_guess_synodic = [0.5, np.pi, 18, 388]
+bounds = ([0, -2*np.pi, 17, 370], [5, 2*np.pi, 19, 410])
+
+# Fit the sinusoidal model
+try:
+    popt_synodic, _ = curve_fit(refined_sinusoidal, julian_dates, magnitudes,
+                                p0=initial_guess_synodic, bounds=bounds, maxfev=10000)
+
+    # Generate smooth curve for fitted model (if needed for other purposes)
+    smooth_julian_dates = np.linspace(min(julian_dates), max(julian_dates), 5000)
+    smooth_fitted_synodic = refined_sinusoidal(smooth_julian_dates, *popt_synodic)
+
+    # Calculate residuals and sigma (not used in plot below)
+    residuals_synodic = magnitudes - refined_sinusoidal(julian_dates, *popt_synodic)
+    sigma_synodic = np.std(residuals_synodic)
+
+    # Plot results
+    plt.figure(figsize=(10, 6))
+    plt.scatter(julian_dates, magnitudes, s=2, color="blue", label="Observed Magnitudes")
+    # Removed: The red sine wave plot.
+    # plt.plot(smooth_julian_dates, smooth_fitted_synodic, color="red",
+    #          label=f"Synodic Period (~{popt_synodic[3]:.2f} days, σ={sigma_synodic:.2f})", linewidth=2)
+
+    plt.axhline(y=18, color="gray", linestyle="--", linewidth=1)
+    plt.xlabel("Julian Date")
+    plt.ylabel("Magnitude")
+    plt.title("Sinusoidal Fit to Comet 29P Magnitude Data with Sigma Rating")
+    plt.gca().invert_yaxis()  # Invert y-axis for astronomical magnitudes
+    plt.legend()
+    plt.show()
+
+except RuntimeError as e:
+    print(f"Curve fitting failed: {e}")
+
+# R-Band light curve
+
+# Define the directory and file path.
+data_directory = "data"
+file_path = os.path.join(data_directory, "29P_R.txt")
+
+# Load the data (which should contain at least "Year", "Julian Date", and "Magnitude" columns).
+data = pd.read_csv(file_path, sep="\t")
+
+# Extract the Julian Dates and Magnitudes.
+julian_dates = data["Julian Date"].values
+magnitudes = data["Magnitude"].values
+
+# Remove NaNs and infinite values.
+mask = (~np.isnan(julian_dates)) & (~np.isnan(magnitudes)) & (~np.isinf(julian_dates)) & (~np.isinf(magnitudes))
+julian_dates = julian_dates[mask]
+magnitudes = magnitudes[mask]
+
+# Create the plot.
+plt.figure(figsize=(10, 6))
+plt.scatter(julian_dates, magnitudes, s=2, color="blue", label="Observed Magnitudes")
+
+# Draw a horizontal reference line at magnitude 18.
+plt.axhline(y=18, color="gray", linestyle="--", linewidth=1)
+
+# --- Add vertical lines for each year ---
+# Ensure that the "Year" column exists in your data.
+if "Year" in data.columns:
+    # Convert unique years to integers for proper sorting.
+    years = sorted(data["Year"].unique(), key=lambda x: int(x))
+    
+    # Loop over each year and plot a vertical line at the maximum Julian Date in that year.
+    for yr in years:
+        yr_data = data[data["Year"] == yr]
+        boundary = yr_data["Julian Date"].max()
+        plt.axvline(x=boundary, color="green", linestyle="--", linewidth=1)
+        # Optionally, add a text label at the bottom of each vertical line.
+        plt.text(boundary, plt.ylim()[0] + 0.5, f"{yr}", rotation=90, verticalalignment="bottom", fontsize=8)
+else:
+    print("Warning: 'Year' column not found in data!")
+    
+# Finalize the plot.
+plt.xlabel("Julian Date")
+plt.ylabel("Magnitude")
+plt.title("Comet 29P Magnitude Data (Filter R) with Year Boundaries")
+plt.xlim(2.4575e6, 2.4608e6)
+plt.ylim(10,18.5)
+plt.gca().invert_yaxis()  # Invert y-axis for astronomical magnitudes
+plt.legend()
+plt.show()
+
+# Brightness Gradient
+
+# Compute gradient (dMag/dTime)
+gradient = np.gradient(magnitudes, julian_dates)
+
+# Optional: plot the gradient
+import matplotlib.pyplot as plt
+plt.plot(julian_dates, gradient, label='dMag/dJD')
+plt.xlabel('Julian Date')
+plt.ylabel('Gradient (mag/day)')
+plt.title('Brightness Change Rate of Comet 29P')
+plt.legend()
+plt.grid(True)
+plt.show()
